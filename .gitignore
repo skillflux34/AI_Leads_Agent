@@ -1,0 +1,38 @@
+# Local Environment Secrets (CRITICAL)
+.env
+.env.*
+*.env
+
+# Python Virtual Environments
+venv/
+.venv/
+env/
+ENV/
+pyvenv.cfg
+
+# Python Cache & Compilation files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Database Files (Prevents overwriting your local dev DB)
+*.sqlite3
+*.db
+
+# Frontend Dependencies & Builds (If you have a frontend folder in this repo)
+node_modules/
+dist/
+build/
+.eslintcache
+
+# OS Specific Files
+.DS_Store
+Thumbs.db
+
+# One-off utility/test scripts
+uriscript.py
+fix_phone.py
+
+# Ignore environment files in any subdirectory
+**/.env
+**/.env.*
