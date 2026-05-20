@@ -2,7 +2,7 @@ from groq import AsyncGroq
 import os
 import asyncio
 from fastapi import APIRouter, Request
-from models.tortoise_models import CallRecord
+from models.tortoise_models import CallRecord, User
 from api.websocket_manager import manager
 from services.hubspot_service import HubSpotService
 
@@ -10,7 +10,7 @@ from services.email_service import EmailService
 from services.calendly_service import CalendlyService
 from services.ai_logic import AILogicEngine
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 email_service = EmailService()
@@ -129,6 +129,26 @@ async def vapi_webhook(request: Request):
 
     print(f"DEBUG: Webhook received: {event_type} for Call ID: {vapi_call_id}")
 
+    if event_type == "transcript":
+        transcript_text = message.get("transcript", "")
+        if not transcript_text and "messages" in message:
+            transcript_text = "\n".join([
+                f"{msg.get('role').capitalize()}: {msg.get('transcript', msg.get('text', ''))}"
+                for msg in message.get("messages", []) if msg.get("transcript") or msg.get("text")
+            ])
+
+        if transcript_text:
+            # Resolve user_id from call record
+            _cr = await CallRecord.filter(vapi_call_id=vapi_call_id).prefetch_related("lead").first()
+            _uid = _cr.lead.user_id if (_cr and _cr.lead) else None
+            await manager.broadcast({
+                "type": "TRANSCRIPT_UPDATE",
+                "user_id": _uid,
+                "call_id": vapi_call_id,
+                "text": transcript_text
+            })
+        return {"status": "ok"}
+
 
     # --- HANDLE TOOL CALLS ---
     if event_type == "tool-calls":
@@ -157,6 +177,7 @@ async def vapi_webhook(request: Request):
 
                 await manager.broadcast({
                     "type": "MEETING_BOOKED",
+                    "user_id": call_record.lead.user_id if (call_record and call_record.lead) else None,
                     "lead_name": lead_name,
                     "lead_email": lead_email,
                     "scheduled_time": start_time,
@@ -196,10 +217,15 @@ async def vapi_webhook(request: Request):
             db_status = "in-progress" if call_status == "in-progress" else call_status
             await CallRecord.filter(vapi_call_id=vapi_call_id).update(status=db_status)
 
+        # Resolve user_id for scoping
+        _cr_status = await CallRecord.filter(vapi_call_id=vapi_call_id).prefetch_related("lead").first() if vapi_call_id else None
+        _uid_status = _cr_status.lead.user_id if (_cr_status and _cr_status.lead) else None
+
         await manager.broadcast({
             "type": "ACTIVE_CALLS_UPDATE",
+            "user_id": _uid_status,
             "count": len(active_calls),
-            "active_call_ids": list(active_calls),  # ✅ convert set → list for JSON
+            "active_call_ids": list(active_calls),
             "status": call_status,
             "call_id": vapi_call_id,
         })
@@ -223,6 +249,7 @@ async def vapi_webhook(request: Request):
 
         await manager.broadcast({
             "type": "HANDOFF_TRIGGERED",
+            "user_id": lead.user_id if lead else None,
             "call_id": vapi_call_id,
             "lead_name": lead_name,
             "lead_score": lead_score,
@@ -254,8 +281,12 @@ async def vapi_webhook(request: Request):
             transcript_text = transcript_data or ""
 
         if transcript_text:
+            # Resolve user_id for scoping
+            _cr_conv = await CallRecord.filter(vapi_call_id=vapi_call_id).prefetch_related("lead").first() if vapi_call_id else None
+            _uid_conv = _cr_conv.lead.user_id if (_cr_conv and _cr_conv.lead) else None
             await manager.broadcast({
                 "type": "TRANSCRIPT_UPDATE",
+                "user_id": _uid_conv,
                 "text": transcript_text
             })
         return {"status": "streaming"}
@@ -267,8 +298,8 @@ async def vapi_webhook(request: Request):
         transcript = (
             data.get("transcript") or
             message.get("transcript") or
-            (data.get("artifact") or message.get("artifact") or {}).get("transcript")
-        )
+            (data.get("artifact") or message.get("artifact") or {}).get("transcript") or ""
+        ).strip()
 
         # ✅ Always extract artifact fields regardless of transcript presence
         artifact = (
@@ -277,22 +308,21 @@ async def vapi_webhook(request: Request):
             data.get("message", {}).get("artifact") or
             {}
         )
-        recording_url = artifact.get("recordingUrl") or data.get("recordingUrl") or message.get("recordingUrl")
+        recording_url = artifact.get("recordingUrl") or data.get("recordingUrl") or message.get("recordingUrl") or ""
 
-        # ✅ Calculate duration from timestamps (Vapi doesn't send durationSeconds)
+        # ✅ Calculate duration from timestamps safely
         started_at = data.get("startedAt") or call_data.get("startedAt") or message.get("startedAt")
         ended_at   = data.get("endedAt")   or call_data.get("endedAt")   or message.get("endedAt")
-        duration_seconds = None
+        duration_seconds = 0
+        
         if started_at and ended_at:
             try:
                 fmt = "%Y-%m-%dT%H:%M:%S.%fZ"
                 start = datetime.strptime(started_at, fmt)
                 end   = datetime.strptime(ended_at,   fmt)
-                duration_seconds = int((end - start).total_seconds())
+                duration_seconds = max(0, int((end - start).total_seconds()))
             except Exception as e:
                 print(f"⚠️ Could not parse duration timestamps: {e}")
-        
-        print(f"DEBUG artifact keys: {list(artifact.keys())}")
 
         if vapi_call_id:
             call_record = await CallRecord.filter(vapi_call_id=vapi_call_id).first()
@@ -308,11 +338,9 @@ async def vapi_webhook(request: Request):
                 )
 
             # --- AUTOMATIC INVALIDATION CHECK ---
-            # Extract the reason the call ended from Vapi's response
-            ended_reason = data.get("endedReason", "")
+            ended_reason = data.get("endedReason", "") or message.get("endedReason", "")
             print(f"ℹ️ Call ended reason: {ended_reason} for Call ID: {vapi_call_id}")
 
-            # Specific carrier failure states representing an invalid or dead line
             INVALID_NUMBER_REASONS = ["error-with-carrier", "invalid-number", "network-error"]
 
             if ended_reason in INVALID_NUMBER_REASONS:
@@ -321,40 +349,42 @@ async def vapi_webhook(request: Request):
 
                 if lead:
                     print(f"🚨 Invalid number detected ({ended_reason}) for lead: {lead.name} ({lead.phone}). Invalidation sequence triggered...")
-                    
-                    # A. Remove from HubSpot CRM automatically
                     if lead.hubspot_id:
-                        await HubSpotService.delete_lead(lead.hubspot_id)
+                        try:
+                            await HubSpotService.delete_lead(lead.hubspot_id)
+                        except Exception as hs_err:
+                            print(f"⚠️ Failed to delete lead from HubSpot: {hs_err}")
                     
-                    # B. Clear out call records linked to this specific lead to maintain database integrity
                     await CallRecord.filter(lead=lead).delete()
                     
-                    # C. Delete the lead from your local database
                     lead_id_for_ui = lead.id
                     lead_name_for_ui = lead.name
                     await lead.delete()
-                    print(f"🗑️ Lead {lead_name_for_ui} completely purged from local system due to invalid number.")
+                    print(f"🗑️ Lead {lead_name_for_ui} completely purged from local system.")
                     
-                    # D. Notify your Dashboard UI via Websockets to remove the card instantly
                     await manager.broadcast({
                         "type": "LEAD_REMOVED",
                         "lead_id": lead_id_for_ui,
                         "message": f"Removed {lead_name_for_ui} due to an invalid phone number."
                     })
                     
-                    # E. Delete standalone orphaned call record and return cleanly
                     await call_record.delete()
                     return {"status": "lead_invalidated_and_purged"}
 
-            # 2. Extract artifact details and update the record (Runs for active valid numbers)
+            # 2. Update Database values for valid calls
             call_record.recording_url = recording_url
-            call_record.duration = int(float(duration_seconds)) if duration_seconds else None
+            call_record.duration = duration_seconds
             call_record.status = "completed"
-            call_record.transcript = transcript # Ensure the raw transcript gets saved to the DB row
+            call_record.transcript = transcript
             await call_record.save()
-            print(f"✅ Call record {vapi_call_id} marked completed with duration {call_record.duration}s and saved.")
+            print(f"✅ Call record {vapi_call_id} marked completed with duration {duration_seconds}s.")
 
-            # 3. Analyze and Process Content
+            # Default values for dashboard sync logic
+            sentiment = "Unknown"
+            intent = "Unknown"
+            lead_score_val = 0
+
+            # 3. Analyze and Process Content (Only execute analytical mutations if a transcript exists)
             if transcript:
                 print(f"Analyzing sentiment for {vapi_call_id}...")
                 sentiment, intent = await analyze_call_content(transcript)
@@ -367,7 +397,7 @@ async def vapi_webhook(request: Request):
                 await call_record.fetch_related("lead")
                 lead = call_record.lead
 
-                # 4. Process Lead-Specific Rules (Only for Real Calls with valid lines)
+                # 4. Process Lead-Specific Rules
                 if lead:
                     score = 50
                     if sentiment == "Positive": score += 30
@@ -381,6 +411,10 @@ async def vapi_webhook(request: Request):
                     score = max(0, min(100, score))
                     lead.score = score
 
+                    # Store the AI-derived intent as lead_status and stamp last_activity
+                    lead.lead_status = intent                          # e.g. "Interested", "Busy"
+                    lead.last_activity = datetime.now(timezone.utc)   # UTC timestamp of this call
+
                     decision = AILogicEngine.process_outcome({"sentiment": sentiment, "intent": intent})
                     keyword_reschedule = detect_reschedule_from_transcript(transcript)
 
@@ -393,33 +427,52 @@ async def vapi_webhook(request: Request):
                         else: lead.status = "new"
 
                     await lead.save()
-
-                    # Sync outcome to CRM
-                    await HubSpotService.update_lead_outcome(
-                        hubspot_id=lead.hubspot_id,
-                        sentiment=sentiment,
-                        intent=intent,
-                        score=lead.score,
-                        transcript=transcript
-                    )
-                    
                     lead_score_val = lead.score
+
+                    # Fetch the lead owner so we can pass user context to HubSpot
+                    lead_owner = await User.get_or_none(id=lead.user_id) if lead.user_id else None
+
+                    # Sync outcome to CRM — pass user AND company so both fields update
+                    if lead_owner:
+                        try:
+                            await HubSpotService.update_lead_outcome(
+                                user=lead_owner,
+                                hubspot_id=lead.hubspot_id,
+                                sentiment=sentiment,
+                                intent=intent,
+                                score=lead.score,
+                                transcript=transcript,
+                                company=lead.company,   # ← company now flows to HubSpot
+                            )
+                        except Exception as hs_up_err:
+                            print(f"⚠️ HubSpot sync failed: {hs_up_err}")
+                    else:
+                        print(f"ℹ️ Lead has no owner — skipping HubSpot sync.")
                 else:
                     print(f"ℹ️ Test call detected (No CRM Lead attached). Skipping Lead and HubSpot updates.")
-                    lead_score_val = 0
 
-                # 5. Broadcast to your UI Dashboard over Websockets
-                await manager.broadcast({
-                    "type": "CALL_STATUS_UPDATE",
-                    "call_id": vapi_call_id,
-                    "sentiment": sentiment,
-                    "intent": intent,
-                    "lead_score": lead_score_val,
-                    "status": "completed",
-                    "duration": call_record.duration,
-                    "recording_url": recording_url
-                })
-                print(f"🚀 Dashboard update broadcasted for {vapi_call_id}")
+            # Safely resolve user_id — lead may be unset if no transcript or test call
+            try:
+                await call_record.fetch_related("lead")
+                _final_lead = call_record.lead
+            except Exception:
+                _final_lead = None
+            user_id = _final_lead.user_id if _final_lead else None
+
+            # 5. Broadcast to your UI Dashboard over Websockets (MOVED OUTSIDE 'if transcript' block)
+            await manager.broadcast({
+                "type": "CALL_STATUS_UPDATE",
+                "user_id": user_id,
+                "call_id": vapi_call_id,
+                "sentiment": sentiment,
+                "intent": intent,
+                "lead_score": lead_score_val,
+                "status": "completed",
+                "duration": duration_seconds,
+                "recording_url": recording_url
+            })
+            print(f"🚀 Dashboard update broadcasted for {vapi_call_id}")
 
     return {"status": "success"}
 
+    

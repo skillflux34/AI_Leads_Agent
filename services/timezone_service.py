@@ -4,8 +4,8 @@ from datetime import datetime
 import pytz
 
 # Calling window: 9 AM to 6 PM lead's local time
-CALL_HOUR_START = 9
-CALL_HOUR_END = 18
+CALL_HOUR_START = 5
+CALL_HOUR_END = 23
 
 
 def get_lead_timezone(phone: str) -> str | None:
@@ -53,7 +53,7 @@ def is_good_time_to_call(phone: str) -> tuple[bool, str]:
         if CALL_HOUR_START <= hour < CALL_HOUR_END:
             return True, f"Good time to call — {local_time_str} in {tz_name}"
         else:
-            return False, f"Outside calling hours — it's {local_time_str} in {tz_name}. Call window: 9 AM–6 PM"
+            return False, f"Outside calling hours — it's {local_time_str} in {tz_name}. Call window: 5 AM–11 PM"
 
     except Exception as e:
         print(f"⚠️ Timezone check error for {phone}: {e}")

@@ -1,17 +1,44 @@
 from tortoise import fields, models
 
+
+class User(models.Model):
+    id = fields.IntField(pk=True)
+    email = fields.CharField(max_length=255, unique=True)
+    password_hash = fields.CharField(max_length=255)
+    full_name = fields.CharField(max_length=255, null=True)
+    role = fields.CharField(max_length=20, default="user")  # "admin" or "user"
+ 
+    # HubSpot OAuth tokens
+    hubspot_access_token = fields.TextField(null=True)
+    hubspot_refresh_token = fields.TextField(null=True)
+    hubspot_token_expires_at = fields.DatetimeField(null=True)
+    hubspot_portal_id = fields.CharField(max_length=100, null=True)
+    hubspot_connected = fields.BooleanField(default=False)
+ 
+    is_active = fields.BooleanField(default=True)
+    created_at = fields.DatetimeField(auto_now_add=True)
+ 
+    class Meta:
+        table = "users"
+
+
 class Lead(models.Model):
     id = fields.IntField(pk=True)
+    user = fields.ForeignKeyField("models.User", related_name="leads", null=True)
     name = fields.CharField(max_length=255)
     phone = fields.CharField(max_length=20, unique=True)
     company = fields.CharField(max_length=255, null=True)
-    status = fields.CharField(max_length=50, default="new")  # new, qualified, cold
+    email = fields.CharField(max_length=255, null=True)
+    status = fields.CharField(max_length=50, default="new")  # new, qualified, cold, rescheduled, handoff, called
+    lead_status = fields.CharField(max_length=100, null=True)  # AI-derived outcome: Interested, Busy, Not Interested, Asking Questions
     score = fields.IntField(default=0)
     hubspot_id = fields.CharField(max_length=100, null=True)
     reschedule_time = fields.DatetimeField(null=True)
+    last_activity = fields.DatetimeField(null=True)  # Timestamp of the most recent call event
 
     class Meta:
         table = "leads"
+
 
 class CallRecord(models.Model):
     id = fields.IntField(pk=True)
@@ -28,8 +55,10 @@ class CallRecord(models.Model):
     class Meta:
         table = "call_records"
 
+
 class Assistant(models.Model):
     id = fields.IntField(pk=True)
+    user = fields.ForeignKeyField("models.User", related_name="assistants", null=True)
     name = fields.CharField(max_length=100)
     vapi_assistant_id = fields.CharField(max_length=255, unique=True) # ID from Vapi Dashboard
     system_prompt = fields.TextField()

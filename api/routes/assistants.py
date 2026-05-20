@@ -1,7 +1,8 @@
 import os
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends, Query
 from services.vapi_service import VapiService
-from models.tortoise_models import Assistant
+from services.auth_service import get_current_user, require_admin
+from models.tortoise_models import Assistant, User
 from pydantic import BaseModel
 
 router = APIRouter()
@@ -18,7 +19,7 @@ class AssistantCreateRequest(BaseModel):
 
 
 @router.post("/create")
-async def create_new_assistant(data: AssistantCreateRequest):
+async def create_new_assistant(data: AssistantCreateRequest, current_user: User = Depends(get_current_user)):
     vapi_res = await vapi_service.create_persistent_assistant(
         name=data.name,
         system_prompt=data.system_prompt,
@@ -36,16 +37,25 @@ async def create_new_assistant(data: AssistantCreateRequest):
         model_provider=data.model_provider,
         model_name=data.model_name,
         vapi_assistant_id=vapi_res["id"],
-        is_active=False
+        is_active=False,
+        user_id=current_user.id
     )
 
     return {"status": "success", "assistant_id": assistant.id, "vapi_id": vapi_res["id"]}
 
 
 @router.get("/list")
-async def list_assistants():
-    """Returns all assistants, active one first."""
-    assistants = await Assistant.all().order_by("-is_active", "-id")
+async def list_assistants(
+    user_id: int = Query(None),
+    current_user: User = Depends(get_current_user)
+):
+    """Returns assistants scoped to the current user. Admins can filter by user_id or see all."""
+    if current_user.role == "admin":
+        qs = Assistant.filter(user_id=user_id) if user_id else Assistant.all()
+    else:
+        qs = Assistant.filter(user_id=current_user.id)
+
+    assistants = await qs.order_by("-is_active", "-id")
     return [
         {
             "id": a.id,
@@ -64,13 +74,18 @@ async def list_assistants():
 
 
 @router.post("/set-active/{vapi_assistant_id}")
-async def set_active_assistant(vapi_assistant_id: str):
-    """Marks one assistant as active for outbound calls. Deactivates all others."""
-    await Assistant.all().update(is_active=False)
-
+async def set_active_assistant(vapi_assistant_id: str, current_user: User = Depends(get_current_user)):
+    """Marks one assistant as active for outbound calls. Deactivates all others for this user."""
     assistant = await Assistant.filter(vapi_assistant_id=vapi_assistant_id).first()
     if not assistant:
         raise HTTPException(status_code=404, detail="Assistant not found")
+
+    # Only allow if owner or admin
+    if current_user.role != "admin" and assistant.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    # Deactivate only this user's assistants
+    await Assistant.filter(user_id=assistant.user_id).update(is_active=False)
 
     assistant.is_active = True
     await assistant.save()
@@ -84,11 +99,11 @@ async def set_active_assistant(vapi_assistant_id: str):
 
 
 @router.get("/active")
-async def get_active_assistant():
-    """Returns the currently active assistant."""
-    assistant = await Assistant.filter(is_active=True).first()
+async def get_active_assistant(current_user: User = Depends(get_current_user)):
+    """Returns the currently active assistant for this user."""
+    assistant = await Assistant.filter(user_id=current_user.id, is_active=True).first()
     if not assistant:
-        assistant = await Assistant.all().order_by("-id").first()
+        assistant = await Assistant.filter(user_id=current_user.id).order_by("-id").first()
     if not assistant:
         raise HTTPException(status_code=404, detail="No assistants found")
 
@@ -101,8 +116,11 @@ async def get_active_assistant():
 
 
 @router.delete("/{assistant_id}")
-async def delete_assistant(assistant_id: str):
+async def delete_assistant(assistant_id: str, current_user: User = Depends(get_current_user)):
     """Removes the assistant from both local DB and Vapi."""
+    existing = await Assistant.filter(vapi_assistant_id=assistant_id).first()
+    if existing and current_user.role != "admin" and existing.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized")
     
     # 1. Delete from Vapi first
     try:
@@ -225,4 +243,3 @@ async def update_assistant_prompt(data: AssistantUpdateRequest):
 
     return {"status": "success", "message": "Assistant prompt updated on Vapi and DB"}
 
-    

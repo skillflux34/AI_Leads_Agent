@@ -8,4 +8,7 @@ export default defineConfig({
     react(),
     tailwindcss(),
   ],
+  server: {
+    proxy: {},  // sometimes just having this triggers the fallback
+  }
 })

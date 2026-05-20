@@ -4,7 +4,7 @@ import {
   ArrowLeft, Phone, PhoneOff, Clock, Search, Filter,
   ChevronDown, Play, Pause, Mic, MicOff, TrendingUp,
   TrendingDown, Minus, User, Building2, Calendar, Hash,
-  X, Volume2, FileText, Activity, ChevronRight, Download
+  X, Volume2, FileText, Activity, ChevronRight, Download, Users
 } from 'lucide-react';
 
 const API = "http://localhost:8000";
@@ -188,7 +188,8 @@ const DetailDrawer = ({ call, onClose }) => {
   useEffect(() => {
     if (!recordingUrl) {
       setLoadingRecording(true);
-      fetch(`${API}/calls/logs/${call.id}/recording`)
+      const _token = localStorage.getItem('token');
+      fetch(`${API}/calls/logs/${call.id}/recording`, { headers: { Authorization: `Bearer ${_token}` } })
         .then(r => r.json())
         .then(d => setRecordingUrl(d.recording_url || null))
         .catch(() => {})
@@ -339,40 +340,45 @@ const CallLogs = () => {
   const [sortBy, setSortBy] = useState('created_at');
   const [sortDir, setSortDir] = useState('desc');
 
-  const fetchLogs = async () => {
+  const localUser = JSON.parse(localStorage.getItem('user') || '{}');
+  const isAdmin = localUser.role === 'admin';
+  const token = localStorage.getItem('token');
+  const authHeaders = { Authorization: `Bearer ${token}` };
+
+  const [usersList, setUsersList] = useState([]);
+  const [selectedUserId, setSelectedUserId] = useState('');
+  const [userDropdownOpen, setUserDropdownOpen] = useState(false);
+  const dropdownRef = React.useRef(null);
+
+  const fetchLogs = async (userId = selectedUserId) => {
     setLoading(true);
     try {
-      const res = await fetch(`${API}/calls/logs`);
+      const query = userId ? `?user_id=${userId}` : '';
+      const res = await fetch(`${API}/calls/logs${query}`, { headers: authHeaders });
+      if (!res.ok) { console.error('fetchLogs failed:', res.status); setLogs([]); return; }
       const data = await res.json();
-      setLogs(data);
+      setLogs(Array.isArray(data) ? data : data.calls ?? []);
     } catch (e) { console.error(e); }
     finally { setLoading(false); }
   };
 
-  useEffect(() => {
-    const fetchLogs = async () => {
-      try {
-        setLoading(true);
-        const response = await fetch(`${API}/calls/logs`); // Matching your backend router path
-        const data = await response.json();
-        
-        // FIX: Handle both direct arrays and object wrappers seamlessly
-        if (Array.isArray(data)) {
-          setLogs(data);
-        } else if (data && Array.isArray(data.calls)) {
-          setLogs(data.calls);
-        } else {
-          setLogs([]);
-        }
-      } catch (error) {
-        console.error("❌ Error loading historical call logs:", error);
-      } finally {
-        setLoading(false);
-      }
-    };
+  const fetchUsers = async () => {
+    if (!isAdmin) return;
+    try {
+      const res = await fetch(`${API}/admin/users`, { headers: authHeaders });
+      if (res.ok) setUsersList(await res.json());
+    } catch (e) { console.error(e); }
+  };
 
+  useEffect(() => {
     fetchLogs();
+    fetchUsers();
+    const handler = (e) => { if (dropdownRef.current && !dropdownRef.current.contains(e.target)) setUserDropdownOpen(false); };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
   }, []);
+
+  useEffect(() => { fetchLogs(selectedUserId); }, [selectedUserId]);
 
   const filtered = logs
     .filter(l => {
@@ -437,12 +443,73 @@ const CallLogs = () => {
             <p className="m-0 text-[11px] text-slate-500">Complete call history & analytics</p>
           </div>
         </div>
-        <button
-          onClick={fetchLogs}
-          className="flex items-center gap-2 px-4 py-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg text-slate-300 text-[13px] cursor-pointer transition-colors"
-        >
-          Refresh
-        </button>
+        <div className="flex items-center gap-3">
+          {/* Admin user filter dropdown */}
+          {isAdmin && (
+            <div className="relative" ref={dropdownRef}>
+              <div
+                onClick={() => setUserDropdownOpen(o => !o)}
+                className="flex items-center gap-2 bg-[#0d1526] border border-[#1e3a5f] rounded-[10px] px-3 py-1.5 cursor-pointer min-w-[190px] select-none"
+              >
+                <div className="w-[20px] h-[20px] rounded-[5px] bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center flex-shrink-0">
+                  <Users size={10} className="text-white" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="m-0 text-[9px] text-slate-500 uppercase tracking-widest font-semibold leading-none">Filter by user</p>
+                  <p className="m-0 text-[12px] text-slate-200 font-semibold truncate">
+                    {selectedUserId ? (usersList.find(u => u.id == selectedUserId)?.full_name || 'User') : 'All Users'}
+                  </p>
+                </div>
+                <ChevronDown size={13} className={`text-slate-500 flex-shrink-0 transition-transform ${userDropdownOpen ? 'rotate-180' : ''}`} />
+              </div>
+
+              {userDropdownOpen && (
+                <div className="absolute top-[calc(100%+6px)] right-0 bg-[#0d1526] border border-[#1e3a5f] rounded-xl z-50 min-w-[220px] p-1.5 shadow-xl">
+                  <div
+                    onClick={() => { setSelectedUserId(''); setUserDropdownOpen(false); }}
+                    className={`flex items-center gap-2.5 px-2.5 py-2 rounded-lg cursor-pointer transition-colors ${!selectedUserId ? 'bg-indigo-950' : 'hover:bg-[#131f35]'}`}
+                  >
+                    <div className="w-6 h-6 rounded-md bg-slate-800 flex items-center justify-center flex-shrink-0">
+                      <Users size={11} className="text-slate-400" />
+                    </div>
+                    <p className="m-0 text-[12px] text-slate-200 font-semibold flex-1">All Users</p>
+                    {!selectedUserId && <div className="w-3 h-3 rounded-full bg-indigo-500" />}
+                  </div>
+                  <div className="h-px bg-slate-800 my-1" />
+                  {usersList.map(u => {
+                    const initials = (u.full_name || u.email).slice(0, 2).toUpperCase();
+                    const isSel = selectedUserId == u.id;
+                    return (
+                      <div
+                        key={u.id}
+                        onClick={() => { setSelectedUserId(u.id); setUserDropdownOpen(false); }}
+                        className={`flex items-center gap-2.5 px-2.5 py-2 rounded-lg cursor-pointer transition-colors ${isSel ? 'bg-indigo-950' : 'hover:bg-[#131f35]'}`}
+                      >
+                        <div className={`w-6 h-6 rounded-md flex items-center justify-center text-[10px] font-bold flex-shrink-0 ${u.role === 'admin' ? 'bg-indigo-950 border border-indigo-800 text-indigo-400' : 'bg-green-950 border border-green-800 text-green-400'}`}>
+                          {initials}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <p className="m-0 text-[12px] text-slate-200 font-semibold truncate">{u.full_name || u.email}</p>
+                        </div>
+                        <span className={`text-[9px] px-1.5 py-0.5 rounded-full font-bold border flex-shrink-0 ${u.role === 'admin' ? 'bg-indigo-950 text-indigo-400 border-indigo-800' : 'bg-slate-800 text-slate-500 border-slate-700'}`}>
+                          {u.role === 'admin' ? 'Admin' : 'User'}
+                        </span>
+                        {isSel && <div className="w-3 h-3 rounded-full bg-indigo-500 flex-shrink-0" />}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+
+          <button
+            onClick={() => fetchLogs()}
+            className="flex items-center gap-2 px-4 py-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg text-slate-300 text-[13px] cursor-pointer transition-colors"
+          >
+            Refresh
+          </button>
+        </div>
       </div>
 
       <div className="px-8 py-6">
@@ -599,6 +666,7 @@ const CallLogs = () => {
         {!loading && filtered.length > 0 && (
           <p className="text-[11px] text-slate-700 mt-3 text-center">
             Showing {filtered.length} of {logs.length} calls
+            {isAdmin && selectedUserId && ` · ${usersList.find(u => u.id == selectedUserId)?.full_name || 'User'}'s logs`}
           </p>
         )}
       </div>

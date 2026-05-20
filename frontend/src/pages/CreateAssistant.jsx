@@ -10,9 +10,11 @@ import {
   Brain,
   ShieldCheck,
   ChevronRight,
+  ChevronDown,
   Trash2,
   CheckCircle2,
   Zap,
+  Users,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import Vapi from '@vapi-ai/web';
@@ -45,6 +47,15 @@ const CreateAssistant = () => {
     vapi_assistant_id: null,
   });
 
+  const localUser = JSON.parse(localStorage.getItem('user') || '{}');
+  const isAdmin = localUser.role === 'admin';
+  const token = localStorage.getItem('token');
+  const authHeaders = { Authorization: `Bearer ${token}` };
+
+  const [usersList, setUsersList] = useState([]);
+  const [selectedFilterUserId, setSelectedFilterUserId] = useState('');
+  const [filterDropdownOpen, setFilterDropdownOpen] = useState(false);
+
   // Active assistant = the one with is_active: true
   const activeAssistant = assistants.find(a => a.is_active);
 
@@ -74,15 +85,30 @@ const CreateAssistant = () => {
     };
   }, [vapi, formData.vapi_assistant_id]);
 
-  const fetchAssistants = async () => {
+  const fetchAssistants = async (userId = selectedFilterUserId) => {
     try {
-      const res = await fetch(`${API}/assistants/list`);
+      const query = userId ? `?user_id=${userId}` : '';
+      const res = await fetch(`${API}/assistants/list${query}`, { headers: authHeaders });
+      if (!res.ok) { console.error('fetchAssistants failed:', res.status); return; }
       const data = await res.json();
-      setAssistants(data);
+      setAssistants(Array.isArray(data) ? data : []);
     } catch (err) { console.error("Error fetching assistants:", err); }
   };
 
-  useEffect(() => { fetchAssistants(); }, []);
+  const fetchUsersForFilter = async () => {
+    if (!isAdmin) return;
+    try {
+      const res = await fetch(`${API}/admin/users`, { headers: authHeaders });
+      if (res.ok) setUsersList(await res.json());
+    } catch (err) { console.error("Error fetching users:", err); }
+  };
+
+  useEffect(() => {
+    fetchAssistants();
+    fetchUsersForFilter();
+  }, []);
+
+  useEffect(() => { fetchAssistants(selectedFilterUserId); }, [selectedFilterUserId]);
 
   const handleSelectAssistant = (assistant) => {
     setFormData({
@@ -99,7 +125,7 @@ const CreateAssistant = () => {
     e.stopPropagation();
     setSetActiveLoading(vapiAssistantId);
     try {
-      const res = await fetch(`${API}/assistants/set-active/${vapiAssistantId}`, { method: 'POST' });
+      const res = await fetch(`${API}/assistants/set-active/${vapiAssistantId}`, { method: 'POST', headers: authHeaders });
       const data = await res.json();
       if (res.ok) {
         await fetchAssistants();
@@ -131,7 +157,7 @@ const CreateAssistant = () => {
 
   const handleDelete = async () => {
     try {
-      const res = await fetch(`${API}/assistants/${assistantToDelete}`, { method: 'DELETE' });
+      const res = await fetch(`${API}/assistants/${assistantToDelete}`, { method: 'DELETE', headers: authHeaders });
       if (res.ok) {
         setAssistants(assistants.filter(a => a.vapi_assistant_id !== assistantToDelete));
         if (formData.vapi_assistant_id === assistantToDelete) {
@@ -147,7 +173,7 @@ const CreateAssistant = () => {
     try {
       const res = await fetch(`${API}/assistants/create`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { ...authHeaders, 'Content-Type': 'application/json' },
         body: JSON.stringify({
           name: formData.name,
           system_prompt: formData.systemPrompt,
@@ -198,6 +224,67 @@ const CreateAssistant = () => {
           </div>
 
           <div className="flex items-center gap-3">
+            {/* Admin workspace filter */}
+            {isAdmin && (
+              <div className="relative">
+                <div
+                  onClick={() => setFilterDropdownOpen(o => !o)}
+                  className="flex items-center gap-2 bg-[#0d1526] border border-[#1e3a5f] rounded-[10px] px-3 py-1.5 cursor-pointer min-w-[190px] select-none"
+                >
+                  <div className="w-[20px] h-[20px] rounded-[5px] bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center flex-shrink-0">
+                    <Users size={10} className="text-white" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="m-0 text-[9px] text-slate-500 uppercase tracking-widest font-semibold leading-none">Filter by user</p>
+                    <p className="m-0 text-[12px] text-slate-200 font-semibold truncate">
+                      {selectedFilterUserId
+                        ? (usersList.find(u => u.id == selectedFilterUserId)?.full_name || 'User')
+                        : 'All Users'}
+                    </p>
+                  </div>
+                  <ChevronDown size={13} className={`text-slate-500 flex-shrink-0 transition-transform ${filterDropdownOpen ? 'rotate-180' : ''}`} />
+                </div>
+
+                {filterDropdownOpen && (
+                  <div className="absolute top-[calc(100%+6px)] right-0 bg-[#0d1526] border border-[#1e3a5f] rounded-xl overflow-hidden z-50 min-w-[220px] p-1.5 shadow-xl">
+                    <div
+                      onClick={() => { setSelectedFilterUserId(''); setFilterDropdownOpen(false); }}
+                      className={`flex items-center gap-2.5 px-2.5 py-2 rounded-lg cursor-pointer transition-colors ${!selectedFilterUserId ? 'bg-indigo-950' : 'hover:bg-[#131f35]'}`}
+                    >
+                      <div className="w-6 h-6 rounded-md bg-slate-800 flex items-center justify-center flex-shrink-0">
+                        <Users size={11} className="text-slate-400" />
+                      </div>
+                      <p className="m-0 text-[12px] text-slate-200 font-semibold flex-1">All Users</p>
+                      {!selectedFilterUserId && <div className="w-3.5 h-3.5 rounded-full bg-indigo-500 flex items-center justify-center"><CheckCircle2 size={8} className="text-white" /></div>}
+                    </div>
+                    <div className="h-px bg-slate-800 my-1" />
+                    {usersList.map(u => {
+                      const initials = (u.full_name || u.email).slice(0, 2).toUpperCase();
+                      const isSel = selectedFilterUserId == u.id;
+                      return (
+                        <div
+                          key={u.id}
+                          onClick={() => { setSelectedFilterUserId(u.id); setFilterDropdownOpen(false); }}
+                          className={`flex items-center gap-2.5 px-2.5 py-2 rounded-lg cursor-pointer transition-colors ${isSel ? 'bg-indigo-950' : 'hover:bg-[#131f35]'}`}
+                        >
+                          <div className={`w-6 h-6 rounded-md flex items-center justify-center text-[10px] font-bold flex-shrink-0 ${u.role === 'admin' ? 'bg-indigo-950 border border-indigo-800 text-indigo-400' : 'bg-green-950 border border-green-800 text-green-400'}`}>
+                            {initials}
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <p className="m-0 text-[12px] text-slate-200 font-semibold truncate">{u.full_name || u.email}</p>
+                          </div>
+                          <span className={`text-[9px] px-1.5 py-0.5 rounded-full font-bold border flex-shrink-0 ${u.role === 'admin' ? 'bg-indigo-950 text-indigo-400 border-indigo-800' : 'bg-slate-800 text-slate-500 border-slate-700'}`}>
+                            {u.role === 'admin' ? 'Admin' : 'User'}
+                          </span>
+                          {isSel && <div className="w-3.5 h-3.5 rounded-full bg-indigo-500 flex items-center justify-center flex-shrink-0"><CheckCircle2 size={8} className="text-white" /></div>}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* Active assistant indicator */}
             {activeAssistant && (
               <div className="flex items-center gap-2 bg-green-950 border border-green-800 rounded-full px-3 py-1.5">
@@ -372,7 +459,11 @@ const CreateAssistant = () => {
             {/* Assistants List */}
             <div className="mt-6">
               <div className="flex items-center justify-between mb-3 px-1">
-                <h3 className="text-sm font-semibold text-slate-400 m-0">Your Assistants</h3>
+                <h3 className="text-sm font-semibold text-slate-400 m-0">
+                  {isAdmin && selectedFilterUserId
+                    ? `${usersList.find(u => u.id == selectedFilterUserId)?.full_name || 'User'}'s Assistants`
+                    : isAdmin ? 'All Assistants' : 'Your Assistants'}
+                </h3>
                 <span className="text-[11px] text-slate-600">Click to preview · Set active for calls</span>
               </div>
 
@@ -442,7 +533,11 @@ const CreateAssistant = () => {
                   );
                 }) : (
                   <div className="text-center py-8 border border-dashed border-slate-800 rounded-xl">
-                    <p className="text-xs text-slate-600 m-0">No assistants yet. Create one above.</p>
+                    <p className="text-xs text-slate-600 m-0">
+                      {isAdmin && selectedFilterUserId
+                        ? 'This user has no assistants yet.'
+                        : 'No assistants yet. Create one above.'}
+                    </p>
                   </div>
                 )}
               </div>

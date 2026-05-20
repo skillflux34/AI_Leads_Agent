@@ -1,5 +1,5 @@
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 from models.tortoise_models import Lead, CallRecord, Assistant
 from services.vapi_service import VapiService
 from services.timezone_service import is_good_time_to_call, get_next_call_window
@@ -9,23 +9,27 @@ vapi_service = VapiService()
 async def process_rescheduled_calls():
     """
     Checks every 60 seconds for leads due a rescheduled call.
-    - Prevents timezone comparison crashes
+    - Uses timezone-aware UTC to correctly compare with DB timestamps
     - Pre-registers CallRecords to prevent webhook race conditions
     - Skips calls outside 9 AM - 6 PM lead's local time
     """
+    tick = 0
     while True:
         # Wait first — prevents firing stale leads instantly on server startup
         await asyncio.sleep(60)
+        tick += 1
         try:
-            now = datetime.utcnow()
+            # ✅ timezone-aware UTC — correctly compares with +05/+00 DB timestamps
+            now = datetime.now(timezone.utc)
+            print(f"⏱️ Reschedule tick #{tick} at {now.strftime('%Y-%m-%d %H:%M:%S UTC')}")
 
             due_leads = await Lead.filter(
                 status="rescheduled",
                 reschedule_time__lte=now
             ).all()
 
-            if due_leads:
-                print(f"🔁 Found {len(due_leads)} lead(s) due for rescheduled call")
+            total_rescheduled = await Lead.filter(status="rescheduled").count()
+            print(f"🔍 Rescheduled leads: {total_rescheduled} total, {len(due_leads)} due now")
 
             for lead in due_leads:
                 # Timezone check — skip if outside calling hours
@@ -74,6 +78,8 @@ async def process_rescheduled_calls():
                     print(f"❌ Reschedule failed for {lead.name}: {result}")
 
         except Exception as e:
+            import traceback
             print(f"🔺 Background Reschedule Loop Error: {e}")
+            print(traceback.format_exc())  # full stack trace so nothing is silently swallowed
 
             

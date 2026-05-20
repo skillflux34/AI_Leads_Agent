@@ -3,6 +3,7 @@ services:
   db:
     image: postgres:15
     environment:
+      - POSTGRES_USER=postgres
       - POSTGRES_PASSWORD=12345678 
       - POSTGRES_DB=leads_agent_db
     ports:

@@ -1,5 +1,6 @@
-from fastapi import APIRouter, HTTPException
-from models.tortoise_models import Lead, CallRecord, Assistant
+from fastapi import APIRouter, HTTPException, Depends, Query
+from models.tortoise_models import Lead, CallRecord, Assistant, User
+from services.auth_service import get_current_user, require_admin
 from services.vapi_service import VapiService
 from services.timezone_service import is_good_time_to_call, get_next_call_window
 from pydantic import BaseModel
@@ -12,12 +13,16 @@ vapi = VapiService()
 
 
 @router.post("/trigger/{lead_id}")
-async def trigger_call(lead_id: int):
+async def trigger_call(lead_id: int, current_user: User = Depends(get_current_user)):
     lead = await Lead.get_or_none(id=lead_id)
     if not lead:
         print(f"DEBUG: Lead {lead_id} not found in database.")
         return {"error": "Lead not found"}
-    
+
+    # Only allow if owner or admin
+    if current_user.role != "admin" and lead.user_id != current_user.id:
+        return {"error": "Not authorized to call this lead"}
+
     # ✅ Timezone check BEFORE calling
     can_call, reason = is_good_time_to_call(lead.phone)
     if not can_call:
@@ -30,13 +35,13 @@ async def trigger_call(lead_id: int):
         }
 
     print(f"✅ Timezone OK: {reason}")
-
     print(f"DEBUG: Attempting to trigger call for {lead.name} at {lead.phone}...")
 
-    # Use active assistant, fallback to most recently created
-    assistant = await Assistant.filter(is_active=True).first()
+    # Use the lead owner's active assistant, fallback to most recently created
+    owner_id = lead.user_id
+    assistant = await Assistant.filter(user_id=owner_id, is_active=True).first()
     if not assistant:
-        assistant = await Assistant.all().order_by("-id").first()
+        assistant = await Assistant.filter(user_id=owner_id).order_by("-id").first()
     if not assistant:
         return {"error": "No assistant found. Create and activate one first."}
 
@@ -61,10 +66,17 @@ async def trigger_call(lead_id: int):
 
 
 @router.get("/logs")
-async def get_call_logs():
-    """Returns all call records with lead info, sorted newest first."""
+async def get_call_logs(
+    user_id: int = Query(None),
+    current_user: User = Depends(get_current_user)
+):
+    """Returns call records scoped to current user. Admins can filter by user_id or see all."""
     try:
-        records = await CallRecord.exclude(lead_id=None).prefetch_related("lead").order_by("-created_at")
+        if current_user.role == "admin":
+            qs = CallRecord.filter(lead__user_id=user_id) if user_id else CallRecord.exclude(lead_id=None)
+        else:
+            qs = CallRecord.filter(lead__user_id=current_user.id)
+        records = await qs.prefetch_related("lead").order_by("-created_at")
 
         result = []
         for r in records:
@@ -96,11 +108,13 @@ async def get_call_logs():
 
 
 @router.get("/logs/{call_id}")
-async def get_call_detail(call_id: int):
+async def get_call_detail(call_id: int, current_user: User = Depends(get_current_user)):
     """Returns full detail for a single call including transcript."""
     record = await CallRecord.get_or_none(id=call_id).prefetch_related("lead")
     if not record:
         raise HTTPException(status_code=404, detail="Call record not found")
+    if current_user.role != "admin" and record.lead and record.lead.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized")
 
     return {
         "id": record.id,
@@ -124,7 +138,7 @@ async def get_call_detail(call_id: int):
 
 
 @router.get("/logs/{call_id}/recording")
-async def get_recording_url(call_id: int):
+async def get_recording_url(call_id: int, current_user: User = Depends(get_current_user)):
     """
     Returns recording URL for a call.
     If not saved in DB, fetches it live from Vapi API.
@@ -182,4 +196,3 @@ async def register_call(data: CallRegister):
     print(f"✅ Registered test call in DB: {data.vapi_call_id}")
     return {"status": "registered", "id": record.id}
 
-    
